@@ -1,15 +1,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstring>
-#include <ctime>
-#include <iomanip>
+#include <cstdlib>
 #include <iostream>
-#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace std;
@@ -32,7 +30,7 @@ constexpr bool kEnforceMirror = false;
 // have been found and at least |kSecondsPerUpdate| seconds have passed since
 // the last report.
 constexpr int kUpdatePerSolutions = 1000;
-constexpr int kSecondsPerUpdate = 1;
+constexpr auto kUpdatePeriod = std::chrono::seconds(1);
 
 // If true, run the search across all available cores. If false, run only on a
 // single thread.
@@ -58,15 +56,28 @@ int kSearchTo = -1; // -1 means unlimited
 /*******************/
 
 
+inline static auto timeNow() { return std::chrono::steady_clock::now(); }
+inline static double durationSeconds(auto start, auto end) { return (double)((end - start) / std::chrono::milliseconds(1)) / 1000.; }
 
 constexpr int factorial(int n) {
     return (n == 1 || n == 0) ? 1 : factorial(n - 1) * n;
 }
 
-constexpr int fact[9] = { factorial(0), factorial(1), factorial(2), factorial(3),
+constexpr int fact[] = { factorial(0), factorial(1), factorial(2), factorial(3),
   factorial(4), factorial(5), factorial(6), factorial(7), factorial(8) };
 
-constexpr int kNumDice = kSides.size();
+constexpr int kNumDice = (int)kSides.size();
+
+constexpr int init_largestSide() {
+    int large = 0;
+    for (int s : kSides) {
+        if (large < s)
+            large = s;
+    }
+    return large;
+}
+constexpr int kLargestSide = init_largestSide();
+
 
 constexpr int num_all_perms() {
     int total = 0;
@@ -80,30 +91,31 @@ constexpr int kNumAllPerms = num_all_perms();
 constexpr array<int, kNumDice + 1> init_total_sides() {
     array<int, kNumDice + 1> total_sides{};
     total_sides[0] = 0;
-    for (int i = 0; i < kNumDice; ++i) {
+    for (char i = 0; i < kNumDice; ++i) {
         total_sides[i + 1] = total_sides[i] + kSides[i];
     }
     return total_sides;
 }
 constexpr array<int, kNumDice + 1> kTotalSides = init_total_sides();
+constexpr int maxInsertPoints = kTotalSides[kNumDice] + 1;
 
-const vector<int> init_real_sides() {
-    vector<int> real_sides(kNumDice);
+constexpr array<int, kNumDice> init_real_sides() {
+    array<int, kNumDice> real_sides{};
     for (int i = 0; i < kNumDice; ++i) {
         real_sides[i] = kSides[i] / (kEnforceMirror ? 2 : 1);
     }
     return real_sides;
 }
-const vector<int> kRealSides = init_real_sides();
+constexpr array kRealSides = init_real_sides();
 
 vector<int> targetC(kNumDice + 1);
 vector<string> all_perms;
 vector<vector<int>> append_map;
-vector<time_t> next_times(kNumDice + 2, 0);
+vector next_times(kNumDice + 2, timeNow());
 // TODO: change to array;
 vector<vector<vector<int>>> weave_map(kNumDice + 1);
 
-time_t minute_report;
+//std::chrono::steady_clock::time_point minute_report;
 
 vector<long> global_solutions(kNumDice + 1);
 mutex print_mutex;
@@ -124,9 +136,9 @@ template <int N, int S, int I> struct ThreadData {
     array<array<int, S>, N + 1> upperBound;
 };
 
-queue<ThreadData<kNumDice, kSides[kNumDice - 1], kTotalSides[kNumDice] + 1>> jobs;
-bool keep_searching = true;
-thread_local ThreadData<kNumDice, kSides[kNumDice - 1], kTotalSides[kNumDice] + 1> td;
+queue<ThreadData<kNumDice, kLargestSide, kTotalSides[kNumDice] + 1>> jobs;
+bool keep_searching = true; // TODO, maybe use jthread's stop token
+thread_local ThreadData<kNumDice, kLargestSide, kTotalSides[kNumDice] + 1> td;
 thread_local vector<long> solutions(kNumDice + 1);
 
 
@@ -171,17 +183,25 @@ bool compare_bigger_char(const string& a, const string& b) {
     return big_char(a) < big_char(b);
 }
 
-void depthN(int n);
+void depthN(const char n);
 
-void depthS(int n, int s) {
-    if (s > 0 && s <= kRealSides[n - 1]) {
+void depthS(const char n, const char s) {
+    if (0 < s && s <= kRealSides[n - 1]) {
+        const int factn = fact[n];
+        const int lastIndex = td.indices[n][s - 1];
+        auto& td_currentCounts_n_s = td.currentCounts[n][s];
+        const auto& td_currentCounts_n_s_1 = td.currentCounts[n][s - 1];
+        const auto& td_insertCounts_n_lastIndex = td.insertCounts[n][lastIndex];
+        const auto& td_minCountsSum_n_s_lastIndex = td.minCountsSum[n][s][lastIndex];
+        const auto& td_maxCountsSum_n_s_lastIndex = td.maxCountsSum[n][s][lastIndex];
+        const int targetC_n = targetC[n];
+
         //do counts
-        int lastIndex = td.indices[n][s - 1];
-        for (int i = 0; i < fact[n]; ++i) {
-            int& current = td.currentCounts[n][s][i];
-            current = td.currentCounts[n][s - 1][i] + td.insertCounts[n][lastIndex][i];
-            if (current + td.minCountsSum[n][s][lastIndex][i] > targetC[n] ||
-                current + td.maxCountsSum[n][s][lastIndex][i] < targetC[n]) {
+        for (int i = 0; i < factn; ++i) {
+            int& current = td_currentCounts_n_s[i];
+            current = td_currentCounts_n_s_1[i] + td_insertCounts_n_lastIndex[i];
+            if (current + td_minCountsSum_n_s_lastIndex[i] > targetC_n ||
+                current + td_maxCountsSum_n_s_lastIndex[i] < targetC_n) {
                 return;
             }
         }
@@ -215,13 +235,15 @@ void depthS(int n, int s) {
             if (kSearchTo > 0 && solutions[n] > kSearchTo) {
                 return;
             }
+
             while (jobs.size() > kJobLimit) {
                 // TODO: is this too frequent?
                 this_thread::sleep_for(chrono::milliseconds(10));
             }
-            jobs_mutex.lock();
-            jobs.push(td);
-            jobs_mutex.unlock();
+            {
+                scoped_lock job_lock(jobs_mutex);
+                jobs.push(td);
+            }
         } else {
             depthN(n + 1);
         }
@@ -233,14 +255,15 @@ void depthS(int n, int s) {
             max = td.indices[n - 1][0];
         }
 
+        auto& td_indices_n_s = td.indices[n][s];
         for (int i = min; i <= max; ++i) {
-            td.indices[n][s] = i;
+            td_indices_n_s = i;
             depthS(n, s + 1);
         }
     }
 }
 
-void depthN(int n) {
+void depthN(const char n) {
     ++solutions[n - 1];
 
     if (solutions[n - 1] % kUpdatePerSolutions == 0) {
@@ -254,26 +277,23 @@ void depthN(int n) {
                 solutions[i] = 0;
             }
         }
-        auto nt = time(NULL);
+        auto nt = timeNow();
         if (nt >= next_times[n]) {
-            time_mutex.lock();
+            scoped_lock time_lock(time_mutex);
             if (nt >= next_times[n]) {
-                print_mutex.lock();
-                cout << (nt - next_times[n] + kSecondsPerUpdate) << " ";
+                scoped_lock print_lock(print_mutex);
+                cout << durationSeconds(next_times[n] - kUpdatePeriod, nt) << " ";
                 report(n);
-                print_mutex.unlock();
-                next_times[n] = nt + kSecondsPerUpdate; // Only once per |kSecondsPerUpdate| seconds.
+                next_times[n] = nt + kUpdatePeriod; // Only once per |kUpdatePeriod|.
             }
-            time_mutex.unlock();
         }
     }
 
     if (n > kNumDice) {
         // Found a solution.
-        if (kPrintSolutions) {
-            print_mutex.lock();
+        if constexpr (kPrintSolutions) {
+            scoped_lock lock(print_mutex);
             cout << td.strings2[n - 1] << endl;
-            print_mutex.unlock();
         }
         return;
     }
@@ -284,17 +304,12 @@ void depthN(int n) {
     const int slenmin1 = slen - 1;
     const int insertPoints = slen + 1;
     const int halfPoints = insertPoints / 2 + 1;
+    const int factn = fact[n];
 
-    int countsBeforeInt[insertPoints][kNumAllPerms + 1];
-    int countsAfterInt[insertPoints][kNumAllPerms + 1];
-
-    for (int i = 0; i != insertPoints; ++i) {
-        for (int j = 0; j != kNumAllPerms + 1; ++j) {
-            countsBeforeInt[i][j] = 0;
-            countsAfterInt[i][j] = 0;
-        }
-    }
-
+    static thread_local int countsBeforeInt[maxInsertPoints][kNumAllPerms + 1];
+    static thread_local int countsAfterInt[maxInsertPoints][kNumAllPerms + 1];
+    std::fill_n(&countsBeforeInt[0][0], insertPoints * (kNumAllPerms + 1), 0);
+    std::fill_n(&countsAfterInt[0][0], insertPoints * (kNumAllPerms + 1), 0);
     countsBeforeInt[0][0] = 1;
     countsAfterInt[0][0] = 1;
 
@@ -312,7 +327,7 @@ void depthN(int n) {
 
     //merge the 2 count
     for (int i = 0; i < insertPoints; ++i) {
-        for (int j = 0; j < fact[n]; ++j) {
+        for (int j = 0; j < factn; ++j) {
             int cb = countsBeforeInt[i][weave_map[n][j][0]];
             int ca = countsAfterInt[insertPoints - i - 1][weave_map[n][j][1]];
             td.insertCounts[n][i][j] = cb * ca;
@@ -324,7 +339,7 @@ void depthN(int n) {
         //set the data to include it's mirror
         for (int i = 0; i < halfPoints; ++i) {
             int ii = insertPoints - i - 1;
-            for (int j = 0; j < fact[n]; ++j) {
+            for (int j = 0; j < factn; ++j) {
                 td.insertCounts[n][i][j] += td.insertCounts[n][ii][j];
             }
         }
@@ -340,38 +355,40 @@ void depthN(int n) {
 
     //calc the min/max
     for (int currentS = kRealSides[n - 1] - 1; currentS >= 0; --currentS) {
-        int max = td.upperBound[n][currentS];
+        const int max = td.upperBound[n][currentS];
         for (int lastIndex = 0; lastIndex < insertPoints; ++lastIndex) {
-            int min = td.lowerBound[n][currentS][lastIndex];
+            const int min = td.lowerBound[n][currentS][lastIndex];
             if (lastIndex > 0 && min == td.lowerBound[n][currentS][lastIndex - 1] || lastIndex > max) {
-                copy(begin(td.minCounts2[n][currentS][lastIndex - 1]), end(td.minCounts2[n][currentS][lastIndex - 1]), begin(td.minCounts2[n][currentS][lastIndex]));
-                copy(begin(td.maxCounts2[n][currentS][lastIndex - 1]), end(td.maxCounts2[n][currentS][lastIndex - 1]), begin(td.maxCounts2[n][currentS][lastIndex]));
-                copy(begin(td.minCountsSum[n][currentS][lastIndex - 1]), end(td.minCountsSum[n][currentS][lastIndex - 1]), begin(td.minCountsSum[n][currentS][lastIndex]));
-                copy(begin(td.maxCountsSum[n][currentS][lastIndex - 1]), end(td.maxCountsSum[n][currentS][lastIndex - 1]), begin(td.maxCountsSum[n][currentS][lastIndex]));
+                std::ranges::copy(td.minCounts2[n][currentS][lastIndex - 1], td.minCounts2[n][currentS][lastIndex]);
+                std::ranges::copy(td.maxCounts2[n][currentS][lastIndex - 1], td.maxCounts2[n][currentS][lastIndex]);
+                std::ranges::copy(td.minCountsSum[n][currentS][lastIndex - 1], td.minCountsSum[n][currentS][lastIndex]);
+                std::ranges::copy(td.maxCountsSum[n][currentS][lastIndex - 1], td.maxCountsSum[n][currentS][lastIndex]);
                 continue;
             }
-            for (int i = 0; i < fact[n]; ++i) {
+
+            for (int i = 0; i < factn; ++i) {
                 int& min_count = td.minCounts2[n][currentS][lastIndex][i];
                 int& max_count = td.maxCounts2[n][currentS][lastIndex][i];
-                min_count = 1000000;
-                max_count = -1000000;
+                // these i,j loops are nested the wrong direction to save more on this lookup
+                const auto& td_insertCounts_n = td.insertCounts[n];
 
-                for (int j = min; j <= max; ++j) {
-                    const auto& insert_count = td.insertCounts[n][j][i];
+                min_count = max_count = td_insertCounts_n[min][i];
+                for (int j = min + 1; j <= max; ++j) {
+                    const auto& insert_count = td_insertCounts_n[j][i];
                     if (min_count > insert_count) {
                         min_count = insert_count;
-                    }
-                    if (max_count < insert_count) {
+                    } else if (max_count < insert_count) {
                         max_count = insert_count;
                     }
                 }
+
                 if (currentS > 0) {
                     td.minCountsSum[n][currentS][lastIndex][i] =
-                        td.minCountsSum[n][currentS + 1][lastIndex][i]
-                        + td.minCounts2[n][currentS][lastIndex][i];
+                        td.minCountsSum[n][currentS + 1][lastIndex][i] +
+                        td.minCounts2[n][currentS][lastIndex][i];
                     td.maxCountsSum[n][currentS][lastIndex][i] =
-                        td.maxCountsSum[n][currentS + 1][lastIndex][i]
-                        + td.maxCounts2[n][currentS][lastIndex][i];
+                        td.maxCountsSum[n][currentS + 1][lastIndex][i] +
+                        td.maxCounts2[n][currentS][lastIndex][i];
                 }
             }
         }
@@ -398,17 +415,18 @@ void threaded_search() {
         depthN(kThreadDepth);
     }
 
-    // Count the solutions from this thread before exiting.
-    solutions_mutex.lock();
-    for (int i = kThreadDepth - 1; i <= kNumDice; ++i) {
-        global_solutions[i] += solutions[i];
+    {
+        // Count the solutions from this thread before exiting.
+        scoped_lock solution_lock(solutions_mutex);
+        for (int i = kThreadDepth - 1; i <= kNumDice; ++i) {
+            global_solutions[i] += solutions[i];
+        }
     }
-    solutions_mutex.unlock();
 }
 
 void search() {
     for (int n = 1; n <= kNumDice; ++n) {
-        int insertPoints = kTotalSides[n] + 1;
+        const int insertPoints = kTotalSides[n] + 1;
 
         for (int s = 0; s < kSides[n - 1]; ++s) {
             int max = kTotalSides[n - 1];
@@ -461,7 +479,7 @@ void init() {
         t = perms[i];
         vector<string> t2;
         for (const string& s : t) {
-            for (int j = 0; j < kNumDice; ++j) {
+            for (char j = 0; j < kNumDice; ++j) {
                 char c = 'a' + j;
                 if (s.find(c) == string::npos) {
                     string s2 = s + c;
@@ -469,7 +487,7 @@ void init() {
                 }
             }
         }
-        perm_index[i + 2] = perm_index[i + 1] + t2.size();
+        perm_index[i + 2] = perm_index[i + 1] + (int)t2.size();
         cout << t2.size() << " ";
         print_vector(t2, true);
         perms.push_back(t2);
@@ -481,11 +499,11 @@ void init() {
     all_perms.reserve(kNumAllPerms);
     //sort
     for (int i = 0; i <= kNumDice; ++i) {
-        vector<string>& t = perms[i];
-        sort(t.begin(), t.end(), compare_bigger_char);
-        cout << t.size() << " ";
-        print_vector(t, true);
-        all_perms.insert(all_perms.end(), t.begin(), t.end());
+        vector<string>& t2 = perms[i];
+        std::ranges::sort(t2, compare_bigger_char);
+        cout << t2.size() << " ";
+        print_vector(t2, true);
+        all_perms.insert(all_perms.end(), t2.begin(), t2.end());
     }
     cout << endl;
     print_vector(perm_index, true);
@@ -496,7 +514,7 @@ void init() {
     // TODO: change to array. Also swap the dimensions.
     append_map = vector<vector<int>>(kNumAllPerms + 1, vector<int>(kNumDice));
     for (int i = 0; i < kNumAllPerms; ++i) {
-        for (int j = 0; j < kNumDice; ++j) {
+        for (char j = 0; j < kNumDice; ++j) {
             string s = all_perms[i];
             s.push_back('a' + j);
             int k;
@@ -512,8 +530,8 @@ void init() {
     print_vector(append_map[1], true);
 
     //weave mapper
-    for (int n = 0; n <= kNumDice; ++n) {
-        int size = perms[n].size();
+    for (char n = 0; n <= kNumDice; ++n) {
+        const int size = (int)perms[n].size();
         // TODO: Change to array and optimize.
         weave_map[n] = vector<vector<int>>(size, vector<int>(2));
 
@@ -522,7 +540,7 @@ void init() {
         for (int a = 0; a < perm_index[n]; ++a) {
             for (int b = 0; b < perm_index[n]; ++b) {
                 string rev = all_perms[a];
-                reverse(rev.begin(), rev.end());
+                std::ranges::reverse(rev);
                 string s = all_perms[b] + c + rev;
                 int si = 0;
                 for (; si < perms[n].size(); ++si) {
@@ -549,13 +567,13 @@ void init() {
     }
 
     global_solutions[1] = global_solutions[0] = 1;
-    if (kThreadDepth <= kNumDice) {
+    if constexpr (kThreadDepth <= kNumDice) {
         global_solutions[kThreadDepth - 1] = kSearchFrom - 1;
     }
 }
 
 int main(int argc, char** argv) {
-    auto start_time = time(NULL);
+    auto start_time = timeNow();
 
     // Override the search range.
     if (argc > 1) {
@@ -568,22 +586,19 @@ int main(int argc, char** argv) {
     init();
 
     // Start up the threads.
-    vector<thread> threads;
-    for (int i = 0; i != kNumThreads; ++i) {
+    vector<jthread> threads;
+    while (threads.size() < kNumThreads) {
         threads.emplace_back(threaded_search);
     }
 
     search();
 
     // Wait for the threads.
-    while (threads.size()) {
-        threads.back().join();
-        threads.pop_back();
-    }
+    threads.clear();
 
     cout << "Search Complete - ";
     print_vector(global_solutions);
-    cout << "- " << (time(NULL) - start_time) << " sec - " << endl;
+    cout << "- " << durationSeconds(start_time, timeNow()) << " sec - " << endl;
     cout << "Sides: ";
     print_array(kSides, true);
     cout << "Mirroring: " << kEnforceMirror << endl;

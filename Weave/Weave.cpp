@@ -123,6 +123,13 @@ mutex solutions_mutex;
 mutex jobs_mutex;
 mutex time_mutex;
 
+//#define USE_CV
+#ifdef USE_CV
+// I thought contion_variable would be the right thing to do, but they're slower 
+condition_variable job_fill_cv;
+condition_variable job_empty_cv;
+#endif 
+
 template <int N, int S, int I> struct ThreadData {
     string strings2[N + 1];
     int indices[N + 1][S];
@@ -236,6 +243,14 @@ void depthS(const char n, const char s) {
                 return;
             }
 
+#ifdef USE_CV
+            unique_lock lock(jobs_mutex);
+            job_fill_cv.wait(lock, []() { return jobs.size() < kJobLimit; });
+            jobs.push(td);
+            lock.unlock();
+
+            job_empty_cv.notify_one();
+#else
             while (jobs.size() > kJobLimit) {
                 // TODO: is this too frequent?
                 this_thread::sleep_for(chrono::milliseconds(10));
@@ -244,6 +259,7 @@ void depthS(const char n, const char s) {
                 scoped_lock job_lock(jobs_mutex);
                 jobs.push(td);
             }
+#endif // USE_CV
         } else {
             depthN(n + 1);
         }
@@ -398,6 +414,26 @@ void depthN(const char n) {
 }
 
 void threaded_search() {
+#ifdef USE_CV
+    unique_lock job_lock(jobs_mutex);
+    while (true) {
+        if (jobs.empty())
+            job_empty_cv.wait(job_lock, []() { return !keep_searching || !jobs.empty(); });
+
+        if (!jobs.empty()) {
+            td = move(jobs.front());
+            jobs.pop();
+            job_lock.unlock();
+
+            job_fill_cv.notify_all();
+            depthN(kThreadDepth);
+            job_lock.lock();
+        } else {
+            break;
+        }
+    }
+    job_lock.unlock();
+#else
     while (true) {
         jobs_mutex.lock();
         if (jobs.empty()) {
@@ -414,6 +450,7 @@ void threaded_search() {
         jobs_mutex.unlock();
         depthN(kThreadDepth);
     }
+#endif // USE_CV
 
     {
         // Count the solutions from this thread before exiting.
